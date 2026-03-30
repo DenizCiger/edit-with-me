@@ -27,12 +27,18 @@ function getRandomColor() {
 
 const MAX_CHARS = 10_000;
 
-export default function Editor({ noteId }: { noteId: string }) {
+interface EditorProps {
+  noteId: string;
+  onStatusChange?: (status: "connecting" | "connected" | "disconnected", users: number) => void;
+}
+
+export default function Editor({ noteId, onStatusChange }: EditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">(
     "connecting"
   );
+  const statusRef = useRef(status);
   const [users, setUsers] = useState(1);
   const [charCount, setCharCount] = useState(0);
 
@@ -56,11 +62,16 @@ export default function Editor({ noteId }: { noteId: string }) {
     });
 
     provider.on("status", ({ status: s }: { status: string }) => {
-      setStatus(s as "connecting" | "connected" | "disconnected");
+      const st = s as "connecting" | "connected" | "disconnected";
+      statusRef.current = st;
+      setStatus(st);
+      onStatusChange?.(st, provider.awareness.getStates().size);
     });
 
     provider.awareness.on("change", () => {
-      setUsers(provider.awareness.getStates().size);
+      const count = provider.awareness.getStates().size;
+      setUsers(count);
+      onStatusChange?.(statusRef.current, count);
     });
 
     // Size limit extension
@@ -187,30 +198,15 @@ export default function Editor({ noteId }: { noteId: string }) {
   }, [setupEditor]);
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-2 border-b text-sm text-muted-foreground">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                status === "connected"
-                  ? "bg-green-500"
-                  : status === "connecting"
-                    ? "bg-yellow-500 animate-pulse"
-                    : "bg-red-500"
-              }`}
-            />
-            <span className="text-xs">{status}</span>
-          </div>
-          <span className="text-xs">
-            {users} {users === 1 ? "user" : "users"}
-          </span>
-        </div>
-        <span className={`text-xs ${charCount > MAX_CHARS * 0.9 ? "text-destructive" : ""}`}>
-          {charCount.toLocaleString()} / {MAX_CHARS.toLocaleString()}
-        </span>
-      </div>
+    <div className="relative flex flex-col h-full">
       <div ref={containerRef} className="flex-1 overflow-hidden" />
+      <div
+        className={`absolute bottom-3 right-3 text-xs px-2.5 py-1 rounded-full bg-background/80 backdrop-blur border text-muted-foreground select-none ${
+          charCount > MAX_CHARS * 0.9 ? "text-destructive border-destructive/30" : ""
+        }`}
+      >
+        {charCount.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+      </div>
     </div>
   );
 }

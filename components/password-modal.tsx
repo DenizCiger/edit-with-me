@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Lock } from "lucide-react";
 
 interface PasswordModalProps {
   noteId: string;
@@ -49,7 +50,10 @@ export default function PasswordModal({ noteId, onSuccess }: PasswordModalProps)
     <Dialog open>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>This note is protected</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <Lock className="h-4 w-4 text-muted-foreground" />
+            This note is protected
+          </DialogTitle>
           <DialogDescription>Enter the password to access this note.</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
