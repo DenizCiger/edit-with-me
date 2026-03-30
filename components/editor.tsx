@@ -41,9 +41,7 @@ export default function Editor({ noteId }: { noteId: string }) {
 
     const ydoc = new Y.Doc();
     const wsUrl =
-      typeof window !== "undefined"
-        ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.hostname}:${process.env.NEXT_PUBLIC_WS_PORT || "4444"}`
-        : "ws://localhost:4444";
+      process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4444";
 
     const provider = new WebsocketProvider(wsUrl, noteId, ydoc);
     const ytext = ydoc.getText("content");
