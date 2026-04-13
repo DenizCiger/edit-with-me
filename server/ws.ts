@@ -7,15 +7,17 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { createHmac } from "crypto";
-
-const WS_PORT = parseInt(process.env.WS_PORT || "4444", 10);
-const EWM_SECRET = process.env.EWM_SECRET || "ewm-dev-secret-change-in-prod";
-const MAX_NOTE_CHARS = 10_000;
+import { EWM_SECRET, MAX_NOTE_CHARS, WS_PORT } from "../lib/constants";
+import {
+  CLEANUP_THROTTLE_MS,
+  getStaleNoteCutoffUnixTimestamp,
+} from "../lib/retention";
 
 // DB setup
 const dataDir = join(process.cwd(), "data");
 mkdirSync(dataDir, { recursive: true });
 const db = new Database(join(dataDir, "ewm.db"));
+let lastCleanupAt = 0;
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 5000");
 db.run(`
@@ -43,6 +45,24 @@ interface Room {
 type ServerWebSocket = import("bun").ServerWebSocket<{ noteId: string }>;
 
 const rooms = new Map<string, Room>();
+
+function cleanupExpiredNotes(nowMs = Date.now()) {
+  const staleNoteIds = db.query("SELECT id FROM notes WHERE updated_at < ?").all(
+    getStaleNoteCutoffUnixTimestamp(nowMs)
+  ) as { id: string }[];
+
+  for (const { id } of staleNoteIds) {
+    const room = rooms.get(id);
+    if (room && room.clients.size > 0) continue;
+    db.query("DELETE FROM notes WHERE id = ?").run(id);
+  }
+}
+
+function maybeCleanupExpiredNotes(nowMs = Date.now()) {
+  if (nowMs - lastCleanupAt < CLEANUP_THROTTLE_MS) return;
+  lastCleanupAt = nowMs;
+  cleanupExpiredNotes(nowMs);
+}
 
 function getOrCreateRoom(noteId: string): Room {
   let room = rooms.get(noteId);
@@ -157,9 +177,11 @@ function verifyAuthCookie(noteId: string, cookieHeader: string | null): boolean 
   return true;
 }
 
-Bun.serve({
+Bun.serve<{ noteId: string }>({
   port: WS_PORT,
   fetch(req, server) {
+    maybeCleanupExpiredNotes();
+
     const url = new URL(req.url);
     const noteId = url.pathname.slice(1); // /<noteId>
 
@@ -168,7 +190,9 @@ Bun.serve({
     }
 
     // Check note exists
-    const note = db.query("SELECT id, password FROM notes WHERE id = ?").get(noteId) as
+    const note = db
+      .query("SELECT id, password FROM notes WHERE id = ? AND updated_at >= ?")
+      .get(noteId, getStaleNoteCutoffUnixTimestamp()) as
       | { id: string; password: string | null }
       | null;
     if (!note) {
@@ -214,9 +238,10 @@ Bun.serve({
         ws.send(encoding.toUint8Array(awarenessEncoder));
       }
     },
-    message(ws: ServerWebSocket, message: ArrayBuffer | Buffer) {
+    message(ws: ServerWebSocket, message: string | ArrayBuffer | Buffer) {
       const room = rooms.get(ws.data.noteId);
       if (!room) return;
+      if (typeof message === "string") return;
 
       const data = new Uint8Array(
         message instanceof ArrayBuffer ? message : message.buffer

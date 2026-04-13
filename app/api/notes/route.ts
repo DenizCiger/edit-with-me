@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createNote } from "@/lib/db";
+import { createNote, maybeCleanupExpiredNotes } from "@/lib/db";
 import { hashPassword } from "@/lib/auth";
 import { generateId } from "@/lib/id";
 
@@ -16,6 +16,8 @@ function isRateLimited(ip: string): boolean {
 }
 
 export async function POST(request: Request) {
+  maybeCleanupExpiredNotes();
+
   const ip =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
 

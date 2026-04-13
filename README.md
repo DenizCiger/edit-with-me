@@ -1,6 +1,6 @@
 # Edit With Me
 
-Real-time collaborative text editor. Create a note, share the URL, and edit together live. Notes are limited to 10,000 characters and can be optionally password protected.
+Real-time collaborative text editor. Create a note, share the URL, and edit together live. Notes are limited to 10,000 characters, can be optionally password protected, and are automatically removed after 7 days without edits.
 
 ## Stack
 
@@ -51,6 +51,7 @@ Notes are persisted to a local SQLite database (`data/ewm.db`, gitignored). The 
 - 10KB size limit enforced on both client and server
 - Rate limiting on note creation (20 notes/IP/hour, in-memory)
 - WebSocket connections to password-protected notes require a valid auth cookie
+- Notes older than 7 days since their last edit are treated as deleted and opportunistically purged
 
 ## Deployment
 
