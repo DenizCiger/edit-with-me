@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
+import type { EditorHandle } from "@/components/editor";
 import PasswordModal from "@/components/password-modal";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,9 @@ export default function NotePage() {
     "connecting" | "connected" | "disconnected"
   >("connecting");
   const [userCount, setUserCount] = useState(1);
+  const [title, setTitle] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const editorRef = useRef<EditorHandle>(null);
 
   useEffect(() => {
     fetch(`/api/notes/${noteId}`)
@@ -53,6 +57,21 @@ export default function NotePage() {
       })
       .catch(() => setState({ status: "not_found" }));
   }, [noteId]);
+
+  // Update browser tab title
+  useEffect(() => {
+    document.title = title ? `${title} — ewm` : "ewm";
+  }, [title]);
+
+  const handleTitleChange = useCallback((newTitle: string) => {
+    setTitle(newTitle);
+  }, []);
+
+  function commitTitle(value: string) {
+    const trimmed = value.trim();
+    setEditingTitle(false);
+    editorRef.current?.setTitle(trimmed);
+  }
 
   function copyLink() {
     navigator.clipboard.writeText(window.location.href);
@@ -130,6 +149,28 @@ export default function NotePage() {
             <span>ewm</span>
           </button>
           <div className="w-px h-4 bg-border" />
+          {editingTitle ? (
+            <input
+              autoFocus
+              defaultValue={title}
+              placeholder="Untitled"
+              className="text-sm font-medium bg-transparent border-b border-foreground/20 outline-none px-1 py-0.5 w-48 focus:border-foreground/50"
+              onBlur={(e) => commitTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitTitle((e.target as HTMLInputElement).value);
+                if (e.key === "Escape") setEditingTitle(false);
+              }}
+            />
+          ) : (
+            <button
+              onClick={() => setEditingTitle(true)}
+              className="text-sm font-medium text-foreground/80 hover:text-foreground truncate max-w-[200px]"
+              title="Click to rename"
+            >
+              {title || "Untitled"}
+            </button>
+          )}
+          <div className="w-px h-4 bg-border" />
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <div
               className={`w-1.5 h-1.5 rounded-full ${
@@ -165,11 +206,13 @@ export default function NotePage() {
       </header>
       <main className="flex-1 overflow-hidden">
         <Editor
+          ref={editorRef}
           noteId={noteId}
           onStatusChange={(status, users) => {
             setConnStatus(status);
             setUserCount(users);
           }}
+          onTitleChange={handleTitleChange}
         />
       </main>
     </div>

@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, useImperativeHandle, forwardRef } from "react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { yCollab } from "y-codemirror.next";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, placeholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { markdown } from "@codemirror/lang-markdown";
+import { languages } from "@codemirror/language-data";
+import { marked } from "marked";
+import { Eye, EyeOff } from "lucide-react";
 
 const colors = [
   "#30bced",
@@ -30,27 +34,50 @@ const MAX_CHARS = 10_000;
 interface EditorProps {
   noteId: string;
   onStatusChange?: (status: "connecting" | "connected" | "disconnected", users: number) => void;
+  onTitleChange?: (title: string) => void;
 }
 
-export default function Editor({ noteId, onStatusChange }: EditorProps) {
+export interface EditorHandle {
+  setTitle: (title: string) => void;
+}
+
+function EditorInner({ noteId, onStatusChange, onTitleChange }: EditorProps, ref: React.Ref<EditorHandle>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const providerRef = useRef<WebsocketProvider | null>(null);
+  const ydocRef = useRef<Y.Doc | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">(
     "connecting"
   );
   const statusRef = useRef(status);
   const [users, setUsers] = useState(1);
   const [charCount, setCharCount] = useState(0);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState("");
+
+  const updatePreview = useCallback((text: string) => {
+    const html = marked.parse(text, { async: false }) as string;
+    setPreviewHtml(html);
+  }, []);
 
   const setupEditor = useCallback(() => {
     if (!containerRef.current) return;
 
     const ydoc = new Y.Doc();
+    ydocRef.current = ydoc;
     const wsUrl =
       process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4444";
 
     const provider = new WebsocketProvider(wsUrl, noteId, ydoc);
+    providerRef.current = provider;
     const ytext = ydoc.getText("content");
+    const yMeta = ydoc.getMap("meta");
+
+    // Observe title changes
+    yMeta.observe(() => {
+      const title = yMeta.get("title") as string | undefined;
+      onTitleChange?.(title || "");
+    });
 
     const userColor = getRandomColor();
     const userName = `User ${Math.floor(Math.random() * 1000)}`;
@@ -165,6 +192,7 @@ export default function Editor({ noteId, onStatusChange }: EditorProps) {
         history(),
         lineNumbers(),
         placeholder("Start typing..."),
+        markdown({ codeLanguages: languages }),
         theme,
         EditorView.lineWrapping,
         yCollab(ytext, provider.awareness),
@@ -185,6 +213,16 @@ export default function Editor({ noteId, onStatusChange }: EditorProps) {
     viewRef.current = view;
     setCharCount(ytext.length);
 
+    // Update preview when text changes
+    ytext.observe(() => {
+      updatePreview(ytext.toString());
+    });
+    updatePreview(ytext.toString());
+
+    // Emit initial title
+    const initialTitle = yMeta.get("title") as string | undefined;
+    if (initialTitle) onTitleChange?.(initialTitle);
+
     return () => {
       provider.destroy();
       ydoc.destroy();
@@ -197,16 +235,43 @@ export default function Editor({ noteId, onStatusChange }: EditorProps) {
     return cleanup;
   }, [setupEditor]);
 
+  useImperativeHandle(ref, () => ({
+    setTitle: (title: string) => {
+      const yMeta = ydocRef.current?.getMap("meta");
+      if (yMeta) yMeta.set("title", title);
+    },
+  }));
+
   return (
-    <div className="relative flex flex-col h-full">
-      <div ref={containerRef} className="flex-1 overflow-hidden" />
+    <div className="relative flex h-full">
       <div
-        className={`absolute bottom-3 right-3 text-xs px-2.5 py-1 rounded-full bg-background/80 backdrop-blur border text-muted-foreground select-none ${
-          charCount > MAX_CHARS * 0.9 ? "text-destructive border-destructive/30" : ""
-        }`}
-      >
-        {charCount.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+        ref={containerRef}
+        className={`flex-1 overflow-hidden ${showPreview ? "w-1/2" : "w-full"}`}
+      />
+      {showPreview && (
+        <div className="w-1/2 border-l overflow-auto p-6 prose prose-sm dark:prose-invert max-w-none">
+          <div dangerouslySetInnerHTML={{ __html: previewHtml }} />
+        </div>
+      )}
+      <div className="absolute bottom-3 right-3 flex items-center gap-2">
+        <button
+          onClick={() => setShowPreview(!showPreview)}
+          className="text-xs px-2.5 py-1 rounded-full bg-background/80 backdrop-blur border text-muted-foreground hover:text-foreground transition-colors"
+          title={showPreview ? "Hide preview" : "Show preview"}
+        >
+          {showPreview ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+        </button>
+        <div
+          className={`text-xs px-2.5 py-1 rounded-full bg-background/80 backdrop-blur border text-muted-foreground select-none ${
+            charCount > MAX_CHARS * 0.9 ? "text-destructive border-destructive/30" : ""
+          }`}
+        >
+          {charCount.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+        </div>
       </div>
     </div>
   );
 }
+
+const Editor = forwardRef(EditorInner);
+export default Editor;
