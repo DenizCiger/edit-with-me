@@ -28,7 +28,7 @@ services:
     container_name: ewm-ws
     restart: unless-stopped
     ports:
-      - "3008:4444"
+      - "127.0.0.1:4444:4444"
     environment:
       NODE_ENV: production
       EWM_SECRET: ${EWM_SECRET}
