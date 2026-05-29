@@ -33,7 +33,7 @@ Open [http://localhost:3000](http://localhost:3000).
 |---|---|---|
 | `EWM_SECRET` | — | **Required in production.** Secret for signing auth cookies. |
 | `WS_PORT` | `4444` | Port for the WebSocket server. |
-| `NEXT_PUBLIC_WS_PORT` | `4444` | WS port exposed to the browser. |
+| `NEXT_PUBLIC_WS_URL` | `ws://localhost:4444` | Browser-facing WebSocket URL. Use `wss://your-domain/ws` behind TLS/proxy. |
 
 ## Architecture
 
@@ -46,10 +46,11 @@ Notes are persisted to a local SQLite database (`data/ewm.db`, gitignored). The 
 
 ## Security
 
+- Markdown preview output is sanitized before rendering
 - Passwords are hashed with Argon2
 - Auth cookies are HMAC-signed (`sha256`), `httpOnly`, `sameSite: strict`, `secure` in production
 - 10KB size limit enforced on both client and server
-- Rate limiting on note creation (20 notes/IP/hour, in-memory)
+- Rate limiting on note creation (20 notes/IP/hour) and password unlock attempts (5 attempts/IP/note/10 minutes), in-memory
 - WebSocket connections to password-protected notes require a valid auth cookie
 - Notes older than 7 days since their last edit are treated as deleted and opportunistically purged
 

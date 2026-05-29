@@ -2,46 +2,56 @@ import { NextResponse } from "next/server";
 import { createNote, maybeCleanupExpiredNotes } from "@/lib/db";
 import { hashPassword } from "@/lib/auth";
 import { generateId } from "@/lib/id";
+import { MAX_NOTE_SIZE, MAX_PASSWORD_CHARS } from "@/lib/constants";
+import {
+  FixedWindowRateLimiter,
+  getClientIp,
+  normalizePassword,
+  parseJsonBodyWithLimit,
+} from "@/lib/security";
 
-const rateLimitMap = new Map<string, number[]>();
-const RATE_LIMIT = 20;
-const RATE_WINDOW = 60 * 60 * 1000; // 1 hour
-
-function isRateLimited(ip: string): boolean {
-  const now = Date.now();
-  const timestamps = rateLimitMap.get(ip) ?? [];
-  const recent = timestamps.filter((t) => now - t < RATE_WINDOW);
-  rateLimitMap.set(ip, recent);
-  return recent.length >= RATE_LIMIT;
-}
+const createNoteLimiter = new FixedWindowRateLimiter({
+  limit: 20,
+  windowMs: 60 * 60 * 1000,
+});
 
 export async function POST(request: Request) {
   maybeCleanupExpiredNotes();
 
-  const ip =
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const ip = getClientIp(request);
+  const limit = createNoteLimiter.consume(`create:${ip}`);
 
-  if (isRateLimited(ip)) {
+  if (!limit.allowed) {
     return NextResponse.json(
       { error: "Rate limit exceeded. Try again later." },
-      { status: 429 }
+      {
+        status: 429,
+        headers: { "Retry-After": Math.ceil(limit.retryAfterMs / 1000).toString() },
+      },
     );
   }
 
-  const body = await request.json().catch(() => ({}));
-  const password = typeof body.password === "string" && body.password.length > 0
-    ? body.password
-    : null;
+  let body: unknown;
+  try {
+    body = await parseJsonBodyWithLimit(request, MAX_NOTE_SIZE);
+  } catch {
+    return NextResponse.json({ error: "Invalid or oversized request body" }, { status: 400 });
+  }
+
+  let password: string | null;
+  try {
+    password = normalizePassword(
+      body && typeof body === "object" ? (body as { password?: unknown }).password : undefined,
+      MAX_PASSWORD_CHARS,
+    );
+  } catch {
+    return NextResponse.json({ error: "Password is too long" }, { status: 400 });
+  }
 
   const id = generateId();
   const passwordHash = password ? await hashPassword(password) : null;
 
   createNote(id, passwordHash);
-
-  // Record for rate limiting
-  const timestamps = rateLimitMap.get(ip) ?? [];
-  timestamps.push(Date.now());
-  rateLimitMap.set(ip, timestamps);
 
   return NextResponse.json({ id }, { status: 201 });
 }

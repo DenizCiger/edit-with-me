@@ -6,8 +6,13 @@ import * as decoding from "lib0/decoding";
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { createHmac } from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 import { EWM_SECRET, MAX_NOTE_CHARS, WS_PORT } from "../lib/constants";
+import {
+  isAllowedOrigin,
+  isBinaryMessageWithinLimit,
+  tryApplyValidatedYjsUpdate,
+} from "./ws-helpers";
 import {
   CLEANUP_THROTTLE_MS,
   getStaleNoteCutoffUnixTimestamp,
@@ -33,12 +38,15 @@ db.run(`
 // Message types
 const MSG_SYNC = 0;
 const MSG_AWARENESS = 1;
+const MAX_WS_MESSAGE_BYTES = 64 * 1024;
+const NOTE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 // Room management
 interface Room {
   doc: Y.Doc;
   awareness: awarenessProtocol.Awareness;
   clients: Set<ServerWebSocket>;
+  clientAwarenessIds: Map<ServerWebSocket, Set<number>>;
   saveTimeout: ReturnType<typeof setTimeout> | null;
 }
 
@@ -81,7 +89,13 @@ function getOrCreateRoom(noteId: string): Room {
   const awareness = new awarenessProtocol.Awareness(doc);
   awareness.setLocalState(null); // server has no local state
 
-  room = { doc, awareness, clients: new Set(), saveTimeout: null };
+  room = {
+    doc,
+    awareness,
+    clients: new Set(),
+    clientAwarenessIds: new Map(),
+    saveTimeout: null,
+  };
   rooms.set(noteId, room);
 
   // Listen for updates and persist
@@ -92,7 +106,17 @@ function getOrCreateRoom(noteId: string): Room {
   // Clean up awareness when clients disconnect
   awareness.on(
     "update",
-    ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
+    (
+      { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
+      origin: ServerWebSocket | null,
+    ) => {
+      if (origin) {
+        const tracked = room.clientAwarenessIds.get(origin) ?? new Set<number>();
+        for (const id of [...added, ...updated]) tracked.add(id);
+        for (const id of removed) tracked.delete(id);
+        room.clientAwarenessIds.set(origin, tracked);
+      }
+
       const encoder = encoding.createEncoder();
       encoding.writeVarUint(encoder, MSG_AWARENESS);
       encoding.writeVarUint8Array(
@@ -138,16 +162,28 @@ function broadcastToRoom(
   }
 }
 
-function cleanupRoom(noteId: string) {
+function flushRoom(noteId: string): void {
   const room = rooms.get(noteId);
-  if (!room || room.clients.size > 0) return;
-  // Save before cleanup
+  if (!room) return;
   const state = Y.encodeStateAsUpdate(room.doc);
   db.query("UPDATE notes SET content = ?, updated_at = unixepoch() WHERE id = ?").run(
     Buffer.from(state),
     noteId,
   );
-  if (room.saveTimeout) clearTimeout(room.saveTimeout);
+  if (room.saveTimeout) {
+    clearTimeout(room.saveTimeout);
+    room.saveTimeout = null;
+  }
+}
+
+function flushAllRooms(): void {
+  for (const noteId of rooms.keys()) flushRoom(noteId);
+}
+
+function cleanupRoom(noteId: string) {
+  const room = rooms.get(noteId);
+  if (!room || room.clients.size > 0) return;
+  flushRoom(noteId);
   room.doc.destroy();
   rooms.delete(noteId);
 }
@@ -169,7 +205,11 @@ function verifyAuthCookie(noteId: string, cookieHeader: string | null): boolean 
   const expectedSig = createHmac("sha256", EWM_SECRET)
     .update(payload)
     .digest("base64url");
-  if (value !== `${payload}.${expectedSig}`) return false;
+  const expectedValue = `${payload}.${expectedSig}`;
+  const actualBuffer = Buffer.from(value);
+  const expectedBuffer = Buffer.from(expectedValue);
+  if (actualBuffer.length !== expectedBuffer.length) return false;
+  if (!timingSafeEqual(actualBuffer, expectedBuffer)) return false;
 
   const [id, expiresStr] = payload.split(":");
   if (id !== noteId) return false;
@@ -177,16 +217,30 @@ function verifyAuthCookie(noteId: string, cookieHeader: string | null): boolean 
   return true;
 }
 
+process.on("SIGTERM", () => {
+  flushAllRooms();
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  flushAllRooms();
+  process.exit(0);
+});
+
 Bun.serve<{ noteId: string }>({
   port: WS_PORT,
   fetch(req, server) {
     maybeCleanupExpiredNotes();
 
+    if (!isAllowedOrigin(req.headers.get("origin"), req.headers.get("host"))) {
+      return new Response("Forbidden origin", { status: 403 });
+    }
+
     const url = new URL(req.url);
     const noteId = url.pathname.slice(1); // /<noteId>
 
-    if (!noteId) {
-      return new Response("Note ID required", { status: 400 });
+    if (!noteId || !NOTE_ID_PATTERN.test(noteId)) {
+      return new Response("Valid note ID required", { status: 400 });
     }
 
     // Check note exists
@@ -243,51 +297,80 @@ Bun.serve<{ noteId: string }>({
       if (!room) return;
       if (typeof message === "string") return;
 
-      const data = new Uint8Array(
-        message instanceof ArrayBuffer ? message : message.buffer
-      );
-      const decoder = decoding.createDecoder(data);
-      const messageType = decoding.readVarUint(decoder);
+      const data = message instanceof ArrayBuffer
+        ? new Uint8Array(message)
+        : new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
 
-      if (messageType === MSG_SYNC) {
-        const encoder = encoding.createEncoder();
-        encoding.writeVarUint(encoder, MSG_SYNC);
-        const syncType = syncProtocol.readSyncMessage(decoder, encoder, room.doc, ws);
+      if (!isBinaryMessageWithinLimit(data, MAX_WS_MESSAGE_BYTES)) {
+        ws.close(1009, "Message too large");
+        return;
+      }
 
-        // Enforce size limit after applying update
-        const text = room.doc.getText("content");
-        if (text.length > MAX_NOTE_CHARS) {
-          // Revert: don't broadcast. The client will be out of sync but
-          // this is a hard limit. In practice the client prevents this.
+      try {
+        const decoder = decoding.createDecoder(data);
+        const messageType = decoding.readVarUint(decoder);
+
+        if (messageType === MSG_SYNC) {
+          const encoder = encoding.createEncoder();
+          encoding.writeVarUint(encoder, MSG_SYNC);
+          const syncMessageType = decoding.readVarUint(decoder);
+
+          if (syncMessageType === syncProtocol.messageYjsSyncStep1) {
+            syncProtocol.readSyncStep1(decoder, encoder, room.doc);
+            ws.send(encoding.toUint8Array(encoder));
+            return;
+          }
+
+          if (
+            syncMessageType === syncProtocol.messageYjsSyncStep2 ||
+            syncMessageType === syncProtocol.messageYjsUpdate
+          ) {
+            const update = decoding.readVarUint8Array(decoder);
+            const result = tryApplyValidatedYjsUpdate(
+              room.doc,
+              update,
+              MAX_NOTE_CHARS,
+              MAX_WS_MESSAGE_BYTES,
+            );
+            if (!result.ok) {
+              ws.close(result.reason === "too_large" ? 1009 : 1003, result.reason ?? "Invalid update");
+              return;
+            }
+            broadcastToRoom(ws.data.noteId, data, ws);
+            return;
+          }
+
+          ws.close(1003, "Unknown sync message");
           return;
         }
 
-        if (encoding.length(encoder) > 1) {
-          ws.send(encoding.toUint8Array(encoder));
+        if (messageType === MSG_AWARENESS) {
+          awarenessProtocol.applyAwarenessUpdate(
+            room.awareness,
+            decoding.readVarUint8Array(decoder),
+            ws,
+          );
+          return;
         }
 
-        // Broadcast sync messages to other clients
-        if (syncType === syncProtocol.messageYjsSyncStep2 || syncType === syncProtocol.messageYjsUpdate) {
-          // Re-encode the update for broadcasting
-          broadcastToRoom(ws.data.noteId, data, ws);
-        }
-      } else if (messageType === MSG_AWARENESS) {
-        awarenessProtocol.applyAwarenessUpdate(
-          room.awareness,
-          decoding.readVarUint8Array(decoder),
-          ws
-        );
+        ws.close(1003, "Unknown message type");
+      } catch {
+        ws.close(1003, "Invalid message");
       }
     },
     close(ws: ServerWebSocket) {
       const room = rooms.get(ws.data.noteId);
       if (!room) return;
       room.clients.delete(ws);
-      awarenessProtocol.removeAwarenessStates(
-        room.awareness,
-        [room.doc.clientID],
-        null
-      );
+      const trackedAwarenessIds = room.clientAwarenessIds.get(ws);
+      if (trackedAwarenessIds?.size) {
+        awarenessProtocol.removeAwarenessStates(
+          room.awareness,
+          [...trackedAwarenessIds],
+          null,
+        );
+      }
+      room.clientAwarenessIds.delete(ws);
       if (room.clients.size === 0) {
         setTimeout(() => cleanupRoom(ws.data.noteId), 30000);
       }

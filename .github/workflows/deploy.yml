@@ -100,11 +100,45 @@ jobs:
           # Check both containers are running
           docker ps -q -f name=ewm-web | grep -q . || { echo "ewm-web not running"; exit 1; }
           docker ps -q -f name=ewm-ws  | grep -q . || { echo "ewm-ws not running";  exit 1; }
-          # HTTP smoke check
+          # HTTP smoke check + WebSocket upgrade check
           for i in $(seq 1 20); do
             STATUS="$(curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:3007/" || true)"
             if [ "${STATUS}" -ge 200 ] 2>/dev/null && [ "${STATUS}" -lt 400 ] 2>/dev/null; then
-              echo "Smoke check passed (HTTP ${STATUS})"
+              NOTE_ID="$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:3007/api/notes" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+              WS_PROBE_OUTPUT="$(NOTE_ID="${NOTE_ID}" python3 - <<'PY'
+          import os
+          import socket
+          
+          
+          def probe(origin: str) -> str:
+              note_id = os.environ["NOTE_ID"]
+              request = (
+                  f"GET /{note_id} HTTP/1.1\r\n"
+                  "Host: 127.0.0.1:4444\r\n"
+                  "Connection: Upgrade\r\n"
+                  "Upgrade: websocket\r\n"
+                  f"Origin: {origin}\r\n"
+                  "Sec-WebSocket-Version: 13\r\n"
+                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                  "\r\n"
+              ).encode()
+              with socket.create_connection(("127.0.0.1", 4444), timeout=3) as sock:
+                  sock.sendall(request)
+                  return sock.recv(256).decode("latin1", "replace").split("\r\n", 1)[0]
+          
+          bad = probe("https://attacker.test")
+          good = probe("http://127.0.0.1:4444")
+          print(f"bad-origin={bad}")
+          print(f"good-origin={good}")
+          if "101" in bad:
+              raise SystemExit("WebSocket origin rejection failed")
+          if "101" not in good:
+              raise SystemExit("WebSocket smoke check failed")
+          PY
+              )"
+              echo "${WS_PROBE_OUTPUT}"
+              curl -fsS -X DELETE "http://127.0.0.1:3007/api/notes/${NOTE_ID}" >/dev/null || true
+              echo "Smoke check passed (HTTP ${STATUS}, WS positive+negative origin)"
               exit 0
             fi
             echo "Waiting (attempt ${i}/20, status=${STATUS})"
