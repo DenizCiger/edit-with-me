@@ -9,7 +9,10 @@ export function ThemeToggle() {
   const { setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
 
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    const mountId = window.setTimeout(() => setMounted(true), 0);
+    return () => window.clearTimeout(mountId);
+  }, []);
 
   if (!mounted) return <Button variant="ghost" size="icon-sm" disabled />;
 

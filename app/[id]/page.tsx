@@ -44,13 +44,11 @@ export default function NotePage() {
       .then((data) => {
         if (!data) return;
         if (data.hasPassword) {
-          fetch(`/api/notes/${noteId}/auth`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ password: "" }),
-          }).then(() => {
-            setState({ status: "needs_password" });
-          });
+          fetch(`/api/notes/${noteId}/auth`)
+            .then((res) => (res.ok ? res.json() : { authorized: false }))
+            .then((auth) => {
+              setState(auth.authorized ? { status: "ready" } : { status: "needs_password" });
+            });
         } else {
           setState({ status: "ready" });
         }

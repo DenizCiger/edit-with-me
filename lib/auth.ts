@@ -1,5 +1,5 @@
 import { hash, verify } from "@node-rs/argon2";
-import { createHmac } from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 import { EWM_SECRET, COOKIE_MAX_AGE } from "./constants";
 
 export async function hashPassword(password: string): Promise<string> {
@@ -24,7 +24,11 @@ function unsign(signedValue: string): string | null {
   const lastDot = signedValue.lastIndexOf(".");
   if (lastDot === -1) return null;
   const value = signedValue.slice(0, lastDot);
-  if (sign(value) !== signedValue) return null;
+  const expected = sign(value);
+  const actualBuffer = Buffer.from(signedValue);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length) return null;
+  if (!timingSafeEqual(actualBuffer, expectedBuffer)) return null;
   return value;
 }
 

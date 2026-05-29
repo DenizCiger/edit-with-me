@@ -9,7 +9,7 @@ import { EditorView, keymap, lineNumbers, placeholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
-import { marked } from "marked";
+import { sanitizeMarkdown } from "@/lib/markdown";
 import { Eye, EyeOff } from "lucide-react";
 
 const colors = [
@@ -46,18 +46,20 @@ function EditorInner({ noteId, onStatusChange, onTitleChange }: EditorProps, ref
   const viewRef = useRef<EditorView | null>(null);
   const providerRef = useRef<WebsocketProvider | null>(null);
   const ydocRef = useRef<Y.Doc | null>(null);
-  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">(
-    "connecting"
-  );
-  const statusRef = useRef(status);
-  const [users, setUsers] = useState(1);
+  const onStatusChangeRef = useRef(onStatusChange);
+  const onTitleChangeRef = useRef(onTitleChange);
+  const statusRef = useRef<"connecting" | "connected" | "disconnected">("connecting");
   const [charCount, setCharCount] = useState(0);
   const [showPreview, setShowPreview] = useState(false);
   const [previewHtml, setPreviewHtml] = useState("");
 
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange;
+    onTitleChangeRef.current = onTitleChange;
+  }, [onStatusChange, onTitleChange]);
+
   const updatePreview = useCallback((text: string) => {
-    const html = marked.parse(text, { async: false }) as string;
-    setPreviewHtml(html);
+    setPreviewHtml(sanitizeMarkdown(text));
   }, []);
 
   const setupEditor = useCallback(() => {
@@ -76,7 +78,7 @@ function EditorInner({ noteId, onStatusChange, onTitleChange }: EditorProps, ref
     // Observe title changes
     yMeta.observe(() => {
       const title = yMeta.get("title") as string | undefined;
-      onTitleChange?.(title || "");
+      onTitleChangeRef.current?.(title || "");
     });
 
     const userColor = getRandomColor();
@@ -91,14 +93,12 @@ function EditorInner({ noteId, onStatusChange, onTitleChange }: EditorProps, ref
     provider.on("status", ({ status: s }: { status: string }) => {
       const st = s as "connecting" | "connected" | "disconnected";
       statusRef.current = st;
-      setStatus(st);
-      onStatusChange?.(st, provider.awareness.getStates().size);
+      onStatusChangeRef.current?.(st, provider.awareness.getStates().size);
     });
 
     provider.awareness.on("change", () => {
       const count = provider.awareness.getStates().size;
-      setUsers(count);
-      onStatusChange?.(statusRef.current, count);
+      onStatusChangeRef.current?.(statusRef.current, count);
     });
 
     // Size limit extension
@@ -221,18 +221,25 @@ function EditorInner({ noteId, onStatusChange, onTitleChange }: EditorProps, ref
 
     // Emit initial title
     const initialTitle = yMeta.get("title") as string | undefined;
-    if (initialTitle) onTitleChange?.(initialTitle);
+    if (initialTitle) onTitleChangeRef.current?.(initialTitle);
 
     return () => {
       provider.destroy();
       ydoc.destroy();
       view.destroy();
     };
-  }, [noteId]);
+  }, [noteId, updatePreview]);
 
   useEffect(() => {
-    const cleanup = setupEditor();
-    return cleanup;
+    let cleanup: (() => void) | undefined;
+    const setupId = window.setTimeout(() => {
+      cleanup = setupEditor();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(setupId);
+      cleanup?.();
+    };
   }, [setupEditor]);
 
   useImperativeHandle(ref, () => ({
